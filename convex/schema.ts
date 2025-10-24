@@ -20,9 +20,19 @@ export default defineSchema({
     )),
     voiceRecordingUrl: v.optional(v.string()),
     voiceRecordingStorageId: v.optional(v.id("_storage")),
+    elevenlabsVoiceId: v.optional(v.string()),
+    voicePreviewStorageId: v.optional(v.id("_storage")),
+    selectedVoiceId: v.optional(v.string()), // The voice ID currently selected for use (custom or default)
     onboardingCompleted: v.boolean(),
     createdAt: v.number(),
   }).index("by_phone", ["phone"]),
+  defaultVoices: defineTable({
+    voiceId: v.string(),
+    name: v.string(),
+    description: v.optional(v.string()),
+    previewStorageId: v.optional(v.id("_storage")),
+    createdAt: v.number(),
+  }).index("by_voiceId", ["voiceId"]),
   tasks: defineTable({
     text: v.string(),
     isCompleted: v.boolean(),

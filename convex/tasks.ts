@@ -394,8 +394,23 @@ export const processProjectWithAI = action({
       console.log("[ai-process] script generated:", script);
 
       console.log("[ai-process] step 2: generating voiceover");
+      // Get user's custom voice ID if available
+      let voiceId: string | undefined;
+      if (project.userId) {
+        const user = await ctx.runQuery(api.users.getCurrentUser, { userId: project.userId });
+        // Use selected voice if available, otherwise fall back to custom voice
+        if (user?.selectedVoiceId) {
+          voiceId = user.selectedVoiceId;
+          console.log("[ai-process] using user's selected voice ID:", voiceId);
+        } else if (user?.elevenlabsVoiceId) {
+          voiceId = user.elevenlabsVoiceId;
+          console.log("[ai-process] using user's custom voice ID:", voiceId);
+        }
+      }
+      
       const voiceoverResult = await ctx.runAction(api.aiServices.generateVoiceover, {
         text: script,
+        voiceId,
       });
 
       if (!voiceoverResult.success || !voiceoverResult.audioUrl) {
@@ -546,8 +561,23 @@ export const regenerateVoiceover = action({
         throw new Error("no script found - generate script first");
       }
 
+      // Get user's selected voice ID if available
+      let voiceId: string | undefined;
+      if (project.userId) {
+        const user = await ctx.runQuery(api.users.getCurrentUser, { userId: project.userId });
+        // Use selected voice if available, otherwise fall back to custom voice
+        if (user?.selectedVoiceId) {
+          voiceId = user.selectedVoiceId;
+          console.log("[regenerate-voiceover] using user's selected voice ID:", voiceId);
+        } else if (user?.elevenlabsVoiceId) {
+          voiceId = user.elevenlabsVoiceId;
+          console.log("[regenerate-voiceover] using user's custom voice ID:", voiceId);
+        }
+      }
+
       const voiceoverResult = await ctx.runAction(api.aiServices.generateVoiceover, {
         text: project.script,
+        voiceId,
       });
 
       if (!voiceoverResult.success || !voiceoverResult.audioUrl) {

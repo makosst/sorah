@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState } from "react";
+import { use, useState, useEffect } from "react";
 import { useQuery, useAction } from "convex/react";
 import Link from "next/link";
 
@@ -50,6 +50,15 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const renderVideo = useAction(api.render.renderVideo);
   const [rendering, setRendering] = useState(false);
 
+  // Reset rendering state based on project status
+  useEffect(() => {
+    if (project?.status === "rendering") {
+      setRendering(true);
+    } else if (project?.status === "completed" || project?.status === "failed") {
+      setRendering(false);
+    }
+  }, [project?.status]);
+
   if (!project) {
     return (
       <main className="min-h-screen bg-gradient-to-br from-purple-50 to-blue-50">
@@ -93,25 +102,23 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 project.status === "failed" ||
                 project.status === "rendering") && (
                 <button
-                  onClick={async () => {
-                    setRendering(true);
-                    try {
-                      await renderVideo({ projectId });
-                    } catch (error) {
+                  onClick={() => {
+                    // Fire and forget - don't await the render
+                    // The UI will update automatically via reactive queries
+                    renderVideo({ projectId }).catch((error) => {
                       console.error("render error:", error);
-                    } finally {
-                      setRendering(false);
-                    }
+                    });
+                    setRendering(true);
                   }}
-                  disabled={rendering}
+                  disabled={rendering || project.status === "rendering"}
                   className="px-4 py-2 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-all disabled:opacity-50"
                 >
-                  {rendering
-                    ? "rendering..."
+                  {project.status === "rendering"
+                    ? "rendering in progress..."
+                    : rendering
+                    ? "starting render..."
                     : project.renderedVideoUrl
                     ? "re-render"
-                    : project.status === "rendering"
-                    ? "restart render"
                     : project.status === "failed"
                     ? "retry render"
                     : "render video"}

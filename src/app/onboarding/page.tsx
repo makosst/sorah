@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation, useQuery, useAction } from "convex/react";
 import { api } from "../../../convex/_generated/api";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
@@ -18,7 +18,7 @@ export default function OnboardingPage() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   
-  const completeOnboarding = useMutation(api.users.completeOnboarding);
+  const completeOnboarding = useAction(api.users.completeOnboarding);
   const generateUploadUrl = useMutation(api.users.generateUploadUrl);
   const { userId, signOut, isInitialized } = useAuth();
   const currentUser = useQuery(api.users.getCurrentUser, userId ? { userId } : "skip");
