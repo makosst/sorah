@@ -31,7 +31,8 @@ export function ScriptTabContent({ project, projectId }: ScriptTabContentProps) 
 
   useEffect(() => {
     if (isEditingScript) return;
-    setScriptDraft(project.script ?? "");
+    // Replace ??? with ? for display
+    setScriptDraft((project.script ?? "").replace(/\?\?\?/g, "?"));
   }, [project.script, isEditingScript]);
 
   const handleSaveScript = async () => {
@@ -44,7 +45,9 @@ export function ScriptTabContent({ project, projectId }: ScriptTabContentProps) 
     setSavingScript(true);
     setSaveScriptError(null);
     try {
-      await updateProjectScript({ id: projectId, script: scriptDraft });
+      // Replace ? with ??? before saving (but not if it's already ???)
+      const scriptToSave = scriptDraft.replace(/\?(?!\?\?)/g, "???");
+      await updateProjectScript({ id: projectId, script: scriptToSave });
       setIsEditingScript(false);
     } catch (error) {
       const message = error instanceof Error ? error.message : "failed to save script";
@@ -243,7 +246,8 @@ export function ScriptTabContent({ project, projectId }: ScriptTabContentProps) 
                     onClick={() => {
                       setIsEditingScript(false);
                       setSaveScriptError(null);
-                      setScriptDraft(project.script ?? "");
+                      // Replace ??? with ? for display
+                      setScriptDraft((project.script ?? "").replace(/\?\?\?/g, "?"));
                     }}
                     className="px-3 py-1 text-xs bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
                   >
@@ -264,7 +268,8 @@ export function ScriptTabContent({ project, projectId }: ScriptTabContentProps) 
                   onClick={() => {
                     setIsEditingScript(true);
                     setSaveScriptError(null);
-                    setScriptDraft(project.script ?? "");
+                    // Replace ??? with ? for editing
+                    setScriptDraft((project.script ?? "").replace(/\?\?\?/g, "?"));
                   }}
                   className="px-3 py-1 text-xs bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 transition-colors"
                 >
@@ -302,7 +307,7 @@ export function ScriptTabContent({ project, projectId }: ScriptTabContentProps) 
             </div>
           ) : (
             <p className="text-gray-800 p-4 bg-gray-50 rounded-lg leading-relaxed whitespace-pre-wrap">
-              {project.script}
+              {(project.script ?? "").replace(/\?\?\?/g, "?")}
             </p>
           )}
           {!isEditingScript && saveScriptError && (

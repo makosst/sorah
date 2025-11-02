@@ -47,6 +47,11 @@ export default function Upload() {
     return null;
   }
 
+  const handleFileSelection = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFiles = Array.from(e.target.files || []);
+    setFiles(selectedFiles);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setUploading(true);
@@ -121,7 +126,7 @@ export default function Upload() {
             create project
           </h1>
           <p className="text-gray-600 mb-2">upload images and videos, describe your idea</p>
-          <p className="text-sm text-gray-500 mb-8">ai will generate script, voiceover, music, and animate your images into videos</p>
+          <p className="text-sm text-gray-500 mb-8">ai will generate script, voiceover, and music for your content</p>
 
           <form onSubmit={handleSubmit} className="space-y-6">
             <div>
@@ -144,7 +149,7 @@ export default function Upload() {
               <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-purple-500 transition-colors">
                 <input
                   type="file"
-                  onChange={(e) => setFiles(Array.from(e.target.files || []))}
+                  onChange={handleFileSelection}
                   multiple
                   accept="image/*,video/*"
                   className="hidden"

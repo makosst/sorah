@@ -101,6 +101,51 @@ export default function Home() {
         }}
       />
 
+      {/* Create Options */}
+      <div className="max-w-6xl mx-auto px-6 -mt-8 mb-8">
+        <div className="grid md:grid-cols-2 gap-6">
+          <button
+            onClick={() => router.push("/studio")}
+            className="bg-white rounded-xl p-8 shadow-lg hover:shadow-xl transition-all border-2 border-purple-200 hover:border-purple-400 text-left group"
+          >
+            <div className="flex items-center gap-4 mb-4">
+              <div className="w-12 h-12 bg-gradient-to-r from-purple-600 to-blue-600 rounded-xl flex items-center justify-center text-white text-2xl">
+                ✨
+              </div>
+              <div>
+                <h3 className="text-xl font-bold text-gray-900 group-hover:text-purple-600 transition-colors">
+                  studio (new!)
+                </h3>
+                <p className="text-sm text-gray-500">streamlined experience</p>
+              </div>
+            </div>
+            <p className="text-gray-600">
+              Simple workflow: add media, review script, and generate your video with one click
+            </p>
+          </button>
+
+          <button
+            onClick={() => router.push("/upload")}
+            className="bg-white rounded-xl p-8 shadow-lg hover:shadow-xl transition-all border-2 border-gray-200 hover:border-gray-400 text-left group"
+          >
+            <div className="flex items-center gap-4 mb-4">
+              <div className="w-12 h-12 bg-gray-700 rounded-xl flex items-center justify-center text-white text-2xl">
+                🎬
+              </div>
+              <div>
+                <h3 className="text-xl font-bold text-gray-900 group-hover:text-gray-700 transition-colors">
+                  advanced
+                </h3>
+                <p className="text-sm text-gray-500">full control</p>
+              </div>
+            </div>
+            <p className="text-gray-600">
+              Complete control with tabs for media, script editing, preview, and sandbox management
+            </p>
+          </button>
+        </div>
+      </div>
+
       <div className="max-w-6xl mx-auto px-6 py-16">
         {projects && projects.length > 0 && (
           <div className="space-y-4">

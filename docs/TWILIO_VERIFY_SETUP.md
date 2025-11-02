@@ -27,8 +27,8 @@ I've updated your authentication to use **Twilio Verify** instead of direct SMS.
 cd /Users/katedeyneka/Documents/ai_building/social_media_agent/sorah
 
 # Set your Twilio credentials (you already have these)
-npx convex env set TWILIO_ACCOUNT_SID xxxxxxxxxxxxxxxxxxxxxx
-npx convex env set TWILIO_AUTH_TOKEN xxxxxxxxxxxxxxxxxxxxxx
+npx convex env set TWILIO_ACCOUNT_SID xxxxxxxxxxxxxxxxxxxxxxx
+npx convex env set TWILIO_AUTH_TOKEN xxxxxxxxxxxxxxxxxxxxxxxv
 
 # Add the Verify Service SID (from Step 1)
 npx convex env set TWILIO_VERIFY_SERVICE_SID VAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

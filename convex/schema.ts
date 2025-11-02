@@ -88,6 +88,7 @@ export default defineSchema({
       v.literal("failed")
     )),
     renderError: v.optional(v.string()),
+    submittedAt: v.optional(v.number()), // Timestamp when user approves script and starts generation
   }).index("by_user", ["userId"]),
 });
 

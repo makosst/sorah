@@ -5,6 +5,7 @@ import { v } from "convex/values";
 import { Sandbox } from "e2b";
 import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
+import { prompts } from "./prompts";
 
 // Helper function to sanitize filenames
 function sanitizeFilename(filename: string): string {
@@ -154,33 +155,133 @@ export const renderVideo = action({
       
       if (project.fileMetadata && project.fileMetadata.length > 0) {
         console.log("[render] uploading original files with metadata...");
+        console.log("[render] Note: Skipping images (they have been animated), only uploading videos");
+        
         for (let i = 0; i < project.fileMetadata.length; i++) {
           const fileMeta = project.fileMetadata[i];
+          
+          // Skip images since they have been animated into videos
+          if (fileMeta.contentType.startsWith('image/')) {
+            console.log(`[render] Skipping image ${fileMeta.filename} (animated version will be used instead)`);
+            continue;
+          }
+          
+          // Only upload videos
+          if (!fileMeta.contentType.startsWith('video/')) {
+            console.log(`[render] Skipping non-video file ${fileMeta.filename} (${fileMeta.contentType})`);
+            continue;
+          }
+          
+          // Get fresh URL to avoid expiration issues
           const fileUrl = await ctx.storage.getUrl(fileMeta.storageId);
-          if (!fileUrl) continue;
+          if (!fileUrl) {
+            console.log(`[render] skipping file ${i}: no URL available for ${fileMeta.filename}`);
+            continue;
+          }
           
           const sanitizedFilename = sanitizeFilename(fileMeta.filename);
-          console.log(`[render] fetching file ${i}: ${fileMeta.filename} -> ${sanitizedFilename}`);
-          const response = await fetch(fileUrl);
-          const buffer = await response.arrayBuffer();
+          console.log(`[render] downloading video ${i + 1}/${project.fileMetadata.length}: ${fileMeta.filename} -> ${sanitizedFilename}`);
           
-          const sandboxPath = `/home/user/public/media/${sanitizedFilename}`;
-          await sandbox.files.write(sandboxPath, buffer);
-          console.log(`[render] uploaded ${sanitizedFilename} (${buffer.byteLength} bytes)`);
+          try {
+            // Use curl to download directly to sandbox - avoids loading large files into Convex action memory
+            const sandboxPath = `/home/user/public/media/${sanitizedFilename}`;
+            // Escape URL for shell: wrap in single quotes and escape any single quotes within
+            const escapedUrl = fileUrl.replace(/'/g, "'\\''");
+            const curlResult = await sandbox.commands.run(
+              `curl -f -L -o "${sandboxPath}" '${escapedUrl}'`,
+              { timeoutMs: 300000 } // 5 min timeout for large files
+            );
+            
+            if (curlResult.exitCode !== 0) {
+              throw new Error(`curl failed: ${curlResult.stderr}`);
+            }
+            
+            // Verify file was downloaded
+            const verifyResult = await sandbox.commands.run(`ls -lh "${sandboxPath}"`);
+            console.log(`[render] ✓ downloaded ${sanitizedFilename} to sandbox: ${verifyResult.stdout}`);
+            
+            // Convert to MP4 and strip audio for better browser compatibility
+            console.log(`[render] converting ${sanitizedFilename} to MP4 and stripping audio...`);
+            const mp4Filename = sanitizedFilename.replace(/\.(mov|avi|webm|mkv)$/i, '.mp4');
+            const mp4Path = `/home/user/public/media/${mp4Filename}`;
+            
+            // Convert to browser-compatible MP4 with H264 codec and strip audio
+            const convertResult = await sandbox.commands.run(
+              `ffmpeg -i "${sandboxPath}" -c:v libx264 -preset fast -crf 23 -an -movflags +faststart "${mp4Path}" -y`,
+              { timeoutMs: 120000 }
+            );
+            
+            if (convertResult.exitCode !== 0) {
+              console.log(`[render] warning: conversion failed, trying simple copy: ${convertResult.stderr}`);
+              // Fallback: just strip audio without re-encoding
+              const fallbackResult = await sandbox.commands.run(
+                `ffmpeg -i "${sandboxPath}" -c:v copy -an "${mp4Path}" -y`,
+                { timeoutMs: 60000 }
+              );
+              if (fallbackResult.exitCode !== 0) {
+                console.log(`[render] warning: audio stripping also failed, using original file: ${fallbackResult.stderr}`);
+              } else {
+                console.log(`[render] ✓ audio stripped (no conversion) -> ${mp4Filename}`);
+                if (mp4Filename !== sanitizedFilename) {
+                  await sandbox.commands.run(`rm "${sandboxPath}"`);
+                }
+              }
+            } else {
+              console.log(`[render] ✓ converted to MP4 and stripped audio -> ${mp4Filename}`);
+              // Remove original if different filename
+              if (mp4Filename !== sanitizedFilename) {
+                await sandbox.commands.run(`rm "${sandboxPath}"`);
+              }
+            }
+            
+            // Verify the file exists and is readable
+            const mp4VerifyResult = await sandbox.commands.run(`ls -lh "${mp4Path}"`);
+            console.log(`[render] verification: ${mp4VerifyResult.stdout}`);
+          } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            throw new Error(`Failed to fetch file ${fileMeta.filename} (${i + 1}/${project.fileMetadata.length}): ${errorMsg}. This may be due to: 1) Expired storage URL (URLs expire after 1 hour), 2) Large file timeout, or 3) Network issues. Try re-uploading the file.`);
+          }
         }
       } else if (project.files && project.files.length > 0) {
         console.log("[render] uploading original files (legacy, no metadata)...");
         for (let i = 0; i < project.files.length; i++) {
           const fileUrl = await ctx.storage.getUrl(project.files[i]);
-          if (!fileUrl) continue;
+          if (!fileUrl) {
+            console.log(`[render] skipping file ${i}: no URL available`);
+            continue;
+          }
           
-          console.log(`[render] fetching file ${i}`);
-          const response = await fetch(fileUrl);
-          const buffer = await response.arrayBuffer();
+          console.log(`[render] downloading file ${i + 1}/${project.files.length}`);
           
-          const sandboxPath = `/home/user/public/media/file${i}`;
-          await sandbox.files.write(sandboxPath, buffer);
-          console.log(`[render] uploaded file${i} (${buffer.byteLength} bytes)`);
+          try {
+            // Use curl to download directly to sandbox - avoids loading large files into Convex action memory
+            const sandboxPath = `/home/user/public/media/file${i}`;
+            // Escape URL for shell: wrap in single quotes and escape any single quotes within
+            const escapedUrl = fileUrl.replace(/'/g, "'\\''");
+            const curlResult = await sandbox.commands.run(
+              `curl -f -L -o "${sandboxPath}" '${escapedUrl}'`,
+              { timeoutMs: 300000 }
+            );
+            
+            if (curlResult.exitCode !== 0) {
+              throw new Error(`curl failed: ${curlResult.stderr}`);
+            }
+            
+            const verifyResult = await sandbox.commands.run(`ls -lh "${sandboxPath}"`);
+            console.log(`[render] ✓ downloaded file${i} to sandbox: ${verifyResult.stdout}`);
+            
+            // Try to strip audio (assuming it's a video, won't hurt if it's not)
+            console.log(`[render] attempting to strip audio from file${i}`);
+            const mutedPath = `/home/user/public/media/file${i}_muted`;
+            const stripAudioResult = await sandbox.commands.run(
+              `ffmpeg -i "${sandboxPath}" -c:v copy -an "${mutedPath}" -y 2>/dev/null && mv "${mutedPath}" "${sandboxPath}" || true`,
+              { timeoutMs: 60000 }
+            );
+            console.log(`[render] audio stripping attempted for file${i}`);
+          } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            throw new Error(`Failed to fetch file ${i + 1}/${project.files.length}: ${errorMsg}. This may be due to expired storage URL or network issues.`);
+          }
         }
       }
       
@@ -191,16 +292,53 @@ export const renderVideo = action({
       }
       
       if (project.audioUrl) {
-        console.log("[render] fetching audio from:", project.audioUrl);
-        const audioResponse = await fetch(project.audioUrl);
-        const audioBuffer = await audioResponse.arrayBuffer();
-        console.log("[render] audio fetched, size:", audioBuffer.byteLength);
+        console.log("[render] downloading audio from:", project.audioUrl);
+        // Use curl to download directly to sandbox - avoids loading files into Convex action memory
+        const escapedUrl = project.audioUrl.replace(/'/g, "'\\''");
         
-        if (audioBuffer.byteLength < 1000) {
-          throw new Error(`audioUrl (voiceover) file is too small (${audioBuffer.byteLength} bytes). This likely means the URL is invalid or returns an error page.`);
+        // First check if file exists before downloading
+        console.log("[render] checking if audio URL is accessible...");
+        const testResult = await sandbox.commands.run(
+          `curl -I -f -L '${escapedUrl}' 2>&1 | head -5`,
+          { timeoutMs: 30000 }
+        );
+        console.log("[render] URL headers:", testResult.stdout);
+        
+        const curlResult = await sandbox.commands.run(
+          `curl -f -L -o "/home/user/public/media/audio.mp3" '${escapedUrl}' 2>&1`,
+          { timeoutMs: 300000 }
+        );
+        
+        // Log curl output for debugging
+        if (curlResult.stdout) {
+          console.log("[render] curl stdout:", curlResult.stdout);
+        }
+        if (curlResult.stderr) {
+          console.log("[render] curl stderr:", curlResult.stderr);
         }
         
-        await sandbox.files.write("/home/user/public/media/audio.mp3", audioBuffer);
+        if (curlResult.exitCode !== 0) {
+          throw new Error(`Failed to download audio: ${curlResult.stderr || curlResult.stdout}`);
+        }
+        
+        // Verify file was downloaded and check size in bytes
+        const sizeResult = await sandbox.commands.run(`stat -f%z "/home/user/public/media/audio.mp3" 2>/dev/null || stat -c%s "/home/user/public/media/audio.mp3"`);
+        const fileSizeBytes = parseInt(sizeResult.stdout.trim() || "0");
+        
+        // Also check what the file actually contains (first 200 chars) to see if it's an error page
+        const fileContentCheck = await sandbox.commands.run(`head -c 200 "/home/user/public/media/audio.mp3" 2>/dev/null || echo "cannot read file"`);
+        console.log("[render] downloaded file first 200 bytes:", fileContentCheck.stdout);
+        
+        if (fileSizeBytes < 1000) {
+          const verifyResult = await sandbox.commands.run(`ls -lh /home/user/public/media/audio.mp3 2>&1 || echo "file not found"`);
+          throw new Error(`audioUrl (voiceover) file is too small (${fileSizeBytes} bytes). This likely means the URL is invalid or returns an error page. File info: ${verifyResult.stdout}. First 200 bytes: ${fileContentCheck.stdout}`);
+        }
+        
+        // Check if file is actually an MP3 (should start with ID3 tag or FF FB for MP3)
+        const magicBytes = await sandbox.commands.run(`hexdump -n 3 -C "/home/user/public/media/audio.mp3" 2>/dev/null | head -1`);
+        console.log("[render] file magic bytes:", magicBytes.stdout);
+        
+        console.log("[render] ✓ audio downloaded, size:", fileSizeBytes, "bytes");
       }
 
       if (project.musicUrl) {
@@ -208,41 +346,80 @@ export const renderVideo = action({
           throw new Error("Cannot render: musicUrl (background music) is a simulated example.com URL. Please run AI processing first to generate real media files.");
         }
         
-        console.log("[render] fetching music from:", project.musicUrl);
-        const musicResponse = await fetch(project.musicUrl);
-        const musicBuffer = await musicResponse.arrayBuffer();
-        console.log("[render] music fetched, size:", musicBuffer.byteLength);
+        console.log("[render] downloading music from:", project.musicUrl);
+        // Use curl to download directly to sandbox - avoids loading files into Convex action memory
+        const escapedUrl = project.musicUrl.replace(/'/g, "'\\''");
+        const curlResult = await sandbox.commands.run(
+          `curl -f -L -o "/home/user/public/media/music.mp3" '${escapedUrl}'`,
+          { timeoutMs: 300000 }
+        );
         
-        if (musicBuffer.byteLength < 1000) {
-          throw new Error(`musicUrl (background music) file is too small (${musicBuffer.byteLength} bytes). This likely means the URL is invalid or returns an error page.`);
+        if (curlResult.exitCode !== 0) {
+          throw new Error(`Failed to download music: ${curlResult.stderr}`);
         }
         
-        await sandbox.files.write("/home/user/public/media/music.mp3", musicBuffer);
+        // Verify file was downloaded and check size in bytes
+        const sizeResult = await sandbox.commands.run(`stat -f%z "/home/user/public/media/music.mp3" 2>/dev/null || stat -c%s "/home/user/public/media/music.mp3"`);
+        const fileSizeBytes = parseInt(sizeResult.stdout.trim() || "0");
+        
+        if (fileSizeBytes < 1000) {
+          const verifyResult = await sandbox.commands.run(`ls -lh /home/user/public/media/music.mp3 2>&1 || echo "file not found"`);
+          throw new Error(`musicUrl (background music) file is too small (${fileSizeBytes} bytes). This likely means the URL is invalid or returns an error page. File info: ${verifyResult.stdout}`);
+        }
+        console.log("[render] ✓ music downloaded, size:", fileSizeBytes, "bytes");
       }
 
       if (project.videoUrls && project.videoUrls.length > 0) {
+        console.log(`[render] Downloading ${project.videoUrls.length} FAL-animated videos (from images)...`);
+        
         for (let i = 0; i < project.videoUrls.length; i++) {
           if (project.videoUrls[i].includes("example.com")) {
             throw new Error(`Cannot render: videoUrls[${i}] (animated video ${i + 1}) is a simulated example.com URL. Please run AI processing first to generate real media files.`);
           }
           
-          console.log(`[render] fetching video ${i} from:`, project.videoUrls[i]);
-          const videoResponse = await fetch(project.videoUrls[i]);
-          const videoBuffer = await videoResponse.arrayBuffer();
-          console.log(`[render] video ${i} fetched, size:`, videoBuffer.byteLength);
+          console.log(`[render] Downloading FAL-animated video ${i + 1}/${project.videoUrls.length} from:`, project.videoUrls[i].substring(0, 80));
+          // Use curl to download directly to sandbox - avoids loading large files into Convex action memory
+          const escapedUrl = project.videoUrls[i].replace(/'/g, "'\\''");
+          const curlResult = await sandbox.commands.run(
+            `curl -f -L -o "/home/user/public/media/video${i}.mp4" '${escapedUrl}'`,
+            { timeoutMs: 300000 }
+          );
           
-          if (videoBuffer.byteLength < 1000) {
-            throw new Error(`videoUrls[${i}] (animated video ${i + 1}) file is too small (${videoBuffer.byteLength} bytes). This likely means the URL is invalid or returns an error page.`);
+          if (curlResult.exitCode !== 0) {
+            throw new Error(`Failed to download FAL video ${i + 1}: ${curlResult.stderr}`);
           }
           
-          await sandbox.files.write(`/home/user/public/media/video${i}.mp4`, videoBuffer);
+          // Verify file was downloaded and check size in bytes
+          const sizeResult = await sandbox.commands.run(`stat -f%z "/home/user/public/media/video${i}.mp4" 2>/dev/null || stat -c%s "/home/user/public/media/video${i}.mp4"`);
+          const fileSizeBytes = parseInt(sizeResult.stdout.trim() || "0");
+          
+          if (fileSizeBytes < 1000) {
+            const verifyResult = await sandbox.commands.run(`ls -lh /home/user/public/media/video${i}.mp4 2>&1 || echo "file not found"`);
+            throw new Error(`videoUrls[${i}] (animated video ${i + 1}) file is too small (${fileSizeBytes} bytes). This likely means the URL is invalid or returns an error page. File info: ${verifyResult.stdout}`);
+          }
+          console.log(`[render] ✓ Downloaded FAL-animated video as video${i}.mp4, size: ${fileSizeBytes} bytes`);
           
           if (i === 0) {
-            await sandbox.files.write(`/home/user/public/reelful/video_2025-10-10_18-12-33%20(2).mp4`, videoBuffer);
+            // Copy first video to reelful directory
+            await sandbox.commands.run(`cp "/home/user/public/media/video${i}.mp4" "/home/user/public/reelful/video_2025-10-10_18-12-33%20(2).mp4"`);
           }
         }
+        console.log(`[render] ✓ All ${project.videoUrls.length} FAL-animated videos downloaded`);
+      } else {
+        console.log("[render] No FAL-animated videos to download (no images were animated)");
       }
-      console.log("[render] files uploaded");
+      console.log("[render] files downloaded");
+
+      // Clean up any temporary download files to free disk space
+      console.log("[render] cleaning up temporary files after upload...");
+      await sandbox.commands.run(`rm -rf /tmp/* 2>/dev/null || true`);
+      
+      const diskUsage = await sandbox.commands.run(`df -h /home/user`);
+      console.log("[render] disk usage after upload:", diskUsage.stdout);
+
+      // List all media files for debugging
+      const mediaFiles = await sandbox.commands.run(`ls -lh /home/user/public/media/`);
+      console.log("[render] media files available:", mediaFiles.stdout);
 
       console.log("[render] running claude agent to edit video...");
       await ctx.runMutation(api.tasks.updateRenderProgress, {
@@ -251,24 +428,7 @@ export const renderVideo = action({
         details: "claude is analyzing footage and creating composition",
       });
       
-      const videoEditorPrompt = `remotion.dev - add new composition using ls public/media files.
-
-read photos, and for each video extract first frame, and create .txt file with a description what's in the video — the first frames of the video, it's for you. you will use the full videos in the composition.
-
-then decide on how to edit them together by emotion: ${project.prompt || 'create an engaging social media video'}
-
-bun remotion render when done
-
-upload out/reelful.mp4 
-curl -X POST https://reels-srt.vercel.app/api/fireworks -F "file=@out/reelful.mp4"
-
-and save srt into the public/reelful.srt
-
-create new composition based on footage from public/reelful using audio.mp3 voice (1.25x sped up) + srt and baked in subtitles (https://www.remotion.dev/docs/recorder/exporting-subtitles#burn-subtitles). select 1-2-4 seconds segments from each video, organize videos in order, based on the freeze frames you have. start with the most interesting shot.
-
-we use bun btw
-
-composition should be portrait!`;
+      const videoEditorPrompt = prompts.videoEditor.generate(project.prompt || 'create an engaging social media video');
 
       console.log("[render] writing prompt via command to avoid timeout");
       const promptBase64 = Buffer.from(videoEditorPrompt).toString('base64');
@@ -290,7 +450,27 @@ composition should be portrait!`;
         throw new Error(`claude video editing failed: ${claudeResult.stderr}`);
       }
 
-      console.log("[render] claude completed, now running remotion render...");
+      console.log("[render] claude completed, now cleaning up disk space...");
+      await ctx.runMutation(api.tasks.updateRenderProgress, {
+        id: projectId,
+        step: "preparing render",
+        details: "cleaning up temporary files to free disk space",
+      });
+
+      // Clean up temporary files and caches to free disk space
+      await sandbox.commands.run(`
+        rm -rf /tmp/* /var/tmp/* 2>/dev/null || true;
+        rm -rf ~/.bun/install/cache/* 2>/dev/null || true;
+        rm -rf ~/.cache/* 2>/dev/null || true;
+        rm -rf /home/user/.cache/* 2>/dev/null || true;
+        rm -rf /home/user/node_modules/.cache/* 2>/dev/null || true;
+      `);
+      
+      console.log("[render] disk cleanup complete, checking disk usage...");
+      const diskCheck = await sandbox.commands.run(`df -h /home/user`);
+      console.log("[render] disk usage:", diskCheck.stdout);
+
+      console.log("[render] running remotion render...");
       await ctx.runMutation(api.tasks.updateRenderProgress, {
         id: projectId,
         step: "rendering video",
@@ -799,27 +979,54 @@ export const createSequence = action({
       }
 
       if (project.audioUrl) {
-        const audioResponse = await fetch(project.audioUrl);
-        const audioBuffer = await audioResponse.arrayBuffer();
-        await sandbox.files.write("/home/user/public/media/audio.mp3", audioBuffer);
+        console.log("[sequence] downloading audio from:", project.audioUrl);
+        // Use curl to download directly to sandbox - avoids loading files into Convex action memory
+        const escapedUrl = project.audioUrl.replace(/'/g, "'\\''");
+        const curlResult = await sandbox.commands.run(
+          `curl -f -L -o "/home/user/public/media/audio.mp3" '${escapedUrl}'`,
+          { timeoutMs: 300000 }
+        );
+        
+        if (curlResult.exitCode !== 0) {
+          throw new Error(`Failed to download audio: ${curlResult.stderr}`);
+        }
+        console.log("[sequence] ✓ audio downloaded");
       }
 
       if (project.musicUrl) {
-        const musicResponse = await fetch(project.musicUrl);
-        const musicBuffer = await musicResponse.arrayBuffer();
-        await sandbox.files.write("/home/user/public/media/music.mp3", musicBuffer);
+        console.log("[sequence] downloading music from:", project.musicUrl);
+        // Use curl to download directly to sandbox - avoids loading files into Convex action memory
+        const escapedUrl = project.musicUrl.replace(/'/g, "'\\''");
+        const curlResult = await sandbox.commands.run(
+          `curl -f -L -o "/home/user/public/media/music.mp3" '${escapedUrl}'`,
+          { timeoutMs: 300000 }
+        );
+        
+        if (curlResult.exitCode !== 0) {
+          throw new Error(`Failed to download music: ${curlResult.stderr}`);
+        }
+        console.log("[sequence] ✓ music downloaded");
       }
 
       if (project.videoUrls && project.videoUrls.length > 0) {
+        console.log(`[sequence] downloading ${project.videoUrls.length} FAL-animated videos...`);
         for (let i = 0; i < project.videoUrls.length; i++) {
-          const videoResponse = await fetch(project.videoUrls[i]);
-          const videoBuffer = await videoResponse.arrayBuffer();
-          await sandbox.files.write(`/home/user/public/media/video${i}.mp4`, videoBuffer);
+          const escapedUrl = project.videoUrls[i].replace(/'/g, "'\\''");
+          const curlResult = await sandbox.commands.run(
+            `curl -f -L -o "/home/user/public/media/video${i}.mp4" '${escapedUrl}'`,
+            { timeoutMs: 300000 }
+          );
+          
+          if (curlResult.exitCode !== 0) {
+            throw new Error(`Failed to download FAL video ${i + 1}: ${curlResult.stderr}`);
+          }
           
           if (i === 0) {
-            await sandbox.files.write(`/home/user/public/reelful/video_2025-10-10_18-12-33%20(2).mp4`, videoBuffer);
+            // Copy first video to reelful directory
+            await sandbox.commands.run(`cp "/home/user/public/media/video${i}.mp4" "/home/user/public/reelful/video_2025-10-10_18-12-33%20(2).mp4"`);
           }
         }
+        console.log(`[sequence] ✓ All ${project.videoUrls.length} FAL-animated videos downloaded`);
       }
 
       console.log("[sequence] running claude agent to edit video...");
@@ -829,24 +1036,7 @@ export const createSequence = action({
         details: "claude is analyzing footage and creating composition",
       });
       
-      const videoEditorPrompt = `remotion.dev - add new composition using ls public/media files.
-
-read photos, and for each video extract first frame, and create .txt file with a description what's in the video — the first frames of the video, it's for you. you will use the full videos in the composition.
-
-then decide on how to edit them together by emotion: ${project.prompt || 'create an engaging social media video'}
-
-bun remotion render when done
-
-upload out/reelful.mp4 
-curl -X POST https://reels-srt.vercel.app/api/fireworks -F "file=@out/reelful.mp4"
-
-and save srt into the public/reelful.srt
-
-create new composition based on footage from public/reelful using audio.mp3 voice (1.25x sped up) + srt and baked in subtitles (https://www.remotion.dev/docs/recorder/exporting-subtitles#burn-subtitles). select 1-2-4 seconds segments from each video, organize videos in order, based on the freeze frames you have. start with the most interesting shot.
-
-we use bun btw
-
-composition should be portrait!`;
+      const videoEditorPrompt = prompts.videoEditor.generate(project.prompt || 'create an engaging social media video');
 
       await sandbox.files.write("/home/user/prompt.txt", videoEditorPrompt);
       
@@ -891,6 +1081,25 @@ export const renderFinalVideo = action({
 
       console.log("[render-final] connecting to sandbox:", project.sandboxId);
       const sandbox = await Sandbox.connect(project.sandboxId, { timeoutMs: 3600000 });
+
+      console.log("[render-final] cleaning up disk space before render...");
+      await ctx.runMutation(api.tasks.updateRenderProgress, {
+        id: projectId,
+        step: "preparing render",
+        details: "cleaning up temporary files to free disk space",
+      });
+
+      // Clean up temporary files and caches to free disk space
+      await sandbox.commands.run(`
+        rm -rf /tmp/* /var/tmp/* 2>/dev/null || true;
+        rm -rf ~/.bun/install/cache/* 2>/dev/null || true;
+        rm -rf ~/.cache/* 2>/dev/null || true;
+        rm -rf /home/user/.cache/* 2>/dev/null || true;
+        rm -rf /home/user/node_modules/.cache/* 2>/dev/null || true;
+      `);
+      
+      const diskCheck = await sandbox.commands.run(`df -h /home/user`);
+      console.log("[render-final] disk usage after cleanup:", diskCheck.stdout);
 
       console.log("[render-final] running remotion render...");
       await ctx.runMutation(api.tasks.updateRenderProgress, {
@@ -1050,7 +1259,7 @@ export const step2UploadFiles = action({
       const sandbox = await Sandbox.connect(project.sandboxId, { timeoutMs: 3600000 });
 
       if (project.srtContent && project.srtContent.trim().length > 0) {
-        console.log("[step2] uploading srt via storage");
+        console.log("[step2] uploading srt via storage (generated with voice)");
         const srtBuffer = Buffer.from(project.srtContent, 'utf-8');
         const srtUploadUrl = await ctx.runMutation(api.tasks.generateUploadUrl, {});
         const srtUploadResponse = await fetch(srtUploadUrl, {
@@ -1064,48 +1273,134 @@ export const step2UploadFiles = action({
         if (srtUrl) {
           await sandbox.commands.run(`curl -o /home/user/public/reelful-fast.srt "${srtUrl}"`);
           await sandbox.commands.run(`curl -o /home/user/public/media/subtitles.srt "${srtUrl}"`);
+          console.log("[step2] ✓ SRT file uploaded to sandbox (subtitles.srt and reelful-fast.srt)");
         }
+      } else {
+        console.warn("[step2] ⚠️  No SRT content found - voice generation may not have completed. Step 3 will fail without SRT.");
       }
 
       if (project.fileMetadata && project.fileMetadata.length > 0) {
+        console.log("[step2] Note: Skipping images (they have been animated), only uploading videos");
+        
         for (let i = 0; i < project.fileMetadata.length; i++) {
           const fileMeta = project.fileMetadata[i];
+          
+          // Skip images since they have been animated into videos
+          if (fileMeta.contentType.startsWith('image/')) {
+            console.log(`[step2] Skipping image ${fileMeta.filename} (animated version will be used instead)`);
+            continue;
+          }
+          
+          // Only upload videos
+          if (!fileMeta.contentType.startsWith('video/')) {
+            console.log(`[step2] Skipping non-video file ${fileMeta.filename} (${fileMeta.contentType})`);
+            continue;
+          }
+          
+          // Get fresh URL to avoid expiration issues
           const fileUrl = await ctx.storage.getUrl(fileMeta.storageId);
-          if (!fileUrl) continue;
+          if (!fileUrl) {
+            console.log(`[step2] skipping file ${i}: no URL available for ${fileMeta.filename}`);
+            continue;
+          }
           
           const sanitizedFilename = sanitizeFilename(fileMeta.filename);
-          console.log(`[step2] uploading ${fileMeta.filename} -> ${sanitizedFilename}`);
-          const response = await fetch(fileUrl);
-          const buffer = await response.arrayBuffer();
+          console.log(`[step2] downloading video ${fileMeta.filename} -> ${sanitizedFilename}`);
           
-          const sandboxPath = `/home/user/public/media/${sanitizedFilename}`;
-          await sandbox.files.write(sandboxPath, buffer);
-          console.log(`[step2] uploaded ${sanitizedFilename}`);
+          try {
+            // Use curl to download directly to sandbox - avoids loading large files into Convex action memory
+            const sandboxPath = `/home/user/public/media/${sanitizedFilename}`;
+            // Escape URL for shell: wrap in single quotes and escape any single quotes within
+            const escapedUrl = fileUrl.replace(/'/g, "'\\''");
+            const curlResult = await sandbox.commands.run(
+              `curl -f -L -o "${sandboxPath}" '${escapedUrl}'`,
+              { timeoutMs: 300000 } // 5 min timeout for large files
+            );
+            
+            if (curlResult.exitCode !== 0) {
+              throw new Error(`curl failed: ${curlResult.stderr}`);
+            }
+            
+            // Verify file was downloaded
+            const verifyResult = await sandbox.commands.run(`ls -lh "${sandboxPath}"`);
+            console.log(`[step2] ✓ downloaded ${sanitizedFilename} to sandbox: ${verifyResult.stdout}`);
+            
+            // Strip audio from the video so only voiceover and background music play
+            console.log(`[step2] stripping audio from ${sanitizedFilename} to ensure only voiceover and music are heard`);
+            const mutedPath = `/home/user/public/media/${sanitizedFilename.replace(/\.(mp4|mov|avi|webm)$/i, '_muted.mp4')}`;
+            const stripAudioResult = await sandbox.commands.run(
+              `ffmpeg -i "${sandboxPath}" -c:v copy -an "${mutedPath}" -y && mv "${mutedPath}" "${sandboxPath}"`,
+              { timeoutMs: 60000 }
+            );
+            
+            if (stripAudioResult.exitCode !== 0) {
+              console.log(`[step2] warning: failed to strip audio from ${sanitizedFilename}, will use original: ${stripAudioResult.stderr}`);
+            } else {
+              console.log(`[step2] ✓ audio stripped from ${sanitizedFilename}`);
+            }
+          } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            throw new Error(`Failed to download file ${fileMeta.filename}: ${errorMsg}. Storage URLs expire after 1 hour - try re-uploading the file if it's been a while.`);
+          }
         }
       }
 
       if (project.audioUrl) {
-        const audioResponse = await fetch(project.audioUrl);
-        const audioBuffer = await audioResponse.arrayBuffer();
-        await sandbox.files.write("/home/user/public/media/audio.mp3", audioBuffer);
+        console.log("[step2] downloading audio from:", project.audioUrl);
+        // Use curl to download directly to sandbox - avoids loading files into Convex action memory
+        const escapedUrl = project.audioUrl.replace(/'/g, "'\\''");
+        const curlResult = await sandbox.commands.run(
+          `curl -f -L -o "/home/user/public/media/audio.mp3" '${escapedUrl}'`,
+          { timeoutMs: 300000 }
+        );
+        
+        if (curlResult.exitCode !== 0) {
+          throw new Error(`Failed to download audio: ${curlResult.stderr}`);
+        }
+        console.log("[step2] ✓ audio downloaded");
       }
 
       if (project.musicUrl) {
-        const musicResponse = await fetch(project.musicUrl);
-        const musicBuffer = await musicResponse.arrayBuffer();
-        await sandbox.files.write("/home/user/public/media/music.mp3", musicBuffer);
+        console.log("[step2] downloading music from:", project.musicUrl);
+        // Use curl to download directly to sandbox - avoids loading files into Convex action memory
+        const escapedUrl = project.musicUrl.replace(/'/g, "'\\''");
+        const curlResult = await sandbox.commands.run(
+          `curl -f -L -o "/home/user/public/media/music.mp3" '${escapedUrl}'`,
+          { timeoutMs: 300000 }
+        );
+        
+        if (curlResult.exitCode !== 0) {
+          throw new Error(`Failed to download music: ${curlResult.stderr}`);
+        }
+        console.log("[step2] ✓ music downloaded");
       }
 
       if (project.videoUrls && project.videoUrls.length > 0) {
+        console.log(`[step2] Downloading ${project.videoUrls.length} FAL-animated videos (from images)...`);
+        
         for (let i = 0; i < project.videoUrls.length; i++) {
-          const videoResponse = await fetch(project.videoUrls[i]);
-          const videoBuffer = await videoResponse.arrayBuffer();
-          await sandbox.files.write(`/home/user/public/media/video${i}.mp4`, videoBuffer);
+          console.log(`[step2] Downloading FAL-animated video ${i + 1}/${project.videoUrls.length}`);
+          // Use curl to download directly to sandbox - avoids loading large files into Convex action memory
+          const escapedUrl = project.videoUrls[i].replace(/'/g, "'\\''");
+          const curlResult = await sandbox.commands.run(
+            `curl -f -L -o "/home/user/public/media/video${i}.mp4" '${escapedUrl}'`,
+            { timeoutMs: 300000 }
+          );
+          
+          if (curlResult.exitCode !== 0) {
+            throw new Error(`Failed to download FAL video ${i + 1}: ${curlResult.stderr}`);
+          }
+          
+          console.log(`[step2] ✓ Downloaded FAL-animated video as video${i}.mp4`);
           
           if (i === 0) {
-            await sandbox.files.write(`/home/user/public/reelful/video_2025-10-10_18-12-33%20(2).mp4`, videoBuffer);
+            // Copy first video to reelful directory
+            await sandbox.commands.run(`cp "/home/user/public/media/video${i}.mp4" "/home/user/public/reelful/video_2025-10-10_18-12-33%20(2).mp4"`);
           }
         }
+        console.log(`[step2] ✓ All ${project.videoUrls.length} FAL-animated videos downloaded`);
+      } else {
+        console.log("[step2] No FAL-animated videos to download");
       }
 
       return { success: true };
@@ -1140,20 +1435,15 @@ export const step3RunVideoEditor = action({
       const project = await ctx.runQuery(api.tasks.getProject, { id: projectId });
       if (!project) throw new Error("project not found");
       if (!project.sandboxId) throw new Error("sandbox not found");
+      
+      // Ensure SRT content exists (should have been generated with voice and uploaded in step2)
+      if (!project.srtContent || project.srtContent.trim().length === 0) {
+        throw new Error("SRT content not found - please ensure voice generation completed successfully before running video editor");
+      }
 
       const sandbox = await Sandbox.connect(project.sandboxId, { timeoutMs: 3600000 });
 
-      const videoEditorPrompt = `remotion.dev - add new composition using ls public/media files.
-
-read photos, and for each video extract first frame, and create .txt file with a description what's in the video — the first frames of the video, it's for you. you will use the full videos in the composition.
-
-then decide on how to edit them together by emotion: ${project.prompt || 'create an engaging social media video'}
-
-create new composition based on footage from public/reelful using audio.mp3 voice (1.25x sped up) + srt and baked in subtitles (https://www.remotion.dev/docs/recorder/exporting-subtitles#burn-subtitles). select 1-2-4 seconds segments from each video, organize videos in order, based on the freeze frames you have. start with the most interesting shot.
-
-we use bun btw
-
-composition should be portrait!`;
+      const videoEditorPrompt = prompts.videoEditor.generateSimplified(project.prompt || 'create an engaging social media video');
 
       const promptBase64 = Buffer.from(videoEditorPrompt).toString('base64');
       await sandbox.commands.run(`echo '${promptBase64}' | base64 -d > /home/user/prompt.txt`);
@@ -1202,6 +1492,19 @@ export const step4RenderSequence = action({
       if (!project.sandboxId) throw new Error("sandbox not found");
 
       const sandbox = await Sandbox.connect(project.sandboxId, { timeoutMs: 3600000 });
+
+      console.log("[step4] cleaning up disk space before render...");
+      // Clean up temporary files and caches to free disk space
+      await sandbox.commands.run(`
+        rm -rf /tmp/* /var/tmp/* 2>/dev/null || true;
+        rm -rf ~/.bun/install/cache/* 2>/dev/null || true;
+        rm -rf ~/.cache/* 2>/dev/null || true;
+        rm -rf /home/user/.cache/* 2>/dev/null || true;
+        rm -rf /home/user/node_modules/.cache/* 2>/dev/null || true;
+      `);
+      
+      const diskCheck = await sandbox.commands.run(`df -h /home/user`);
+      console.log("[step4] disk usage after cleanup:", diskCheck.stdout);
 
       console.log("[step4] running bun remotion render...");
       const remotionResult = await sandbox.commands.run(`bun remotion render`, {

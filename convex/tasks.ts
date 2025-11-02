@@ -2,6 +2,7 @@ import { query, mutation, action, QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
+import { prompts } from "./prompts";
 
 const isImageUrl = (url: string): boolean => {
   const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'];
@@ -217,6 +218,16 @@ export const updateProjectScript = mutation({
   },
 });
 
+export const markProjectSubmitted = mutation({
+  args: {
+    id: v.id("projects"),
+  },
+  handler: async (ctx, { id }) => {
+    await ctx.db.patch(id, { submittedAt: Date.now() });
+    return { id };
+  },
+});
+
 export const updateProjectWithRenderResult = mutation({
   args: {
     id: v.id("projects"),
@@ -360,6 +371,280 @@ export const processProjectWithReelful = action({
   },
 });
 
+export const generateScriptOnly = action({
+  args: {
+    projectId: v.id("projects"),
+  },
+  handler: async (ctx, { projectId }): Promise<{ success: boolean; script?: string; error?: string }> => {
+    console.log("[generate-script] starting script generation for project:", projectId);
+
+    try {
+      const project = await ctx.runQuery(api.tasks.getProject, { id: projectId });
+      if (!project) {
+        throw new Error("project not found");
+      }
+
+      // Get user's preferred style
+      let style = "professional"; // default
+      if (project.userId) {
+        const user = await ctx.runQuery(api.users.getCurrentUser, { userId: project.userId });
+        if (user?.preferredStyle) {
+          style = user.preferredStyle;
+          console.log("[generate-script] using user's preferred style:", style);
+        }
+      }
+
+      console.log("[generate-script] generating script from prompt and images");
+      const fileUrls = project.fileUrls?.filter((url: string | null): url is string => url !== null) || [];
+      const scriptResult = await ctx.runAction(api.aiServices.generateScript, {
+        prompt: project.prompt,
+        imageUrls: fileUrls,
+        style,
+      });
+
+      if (!scriptResult.success) {
+        throw new Error(`script generation failed: ${scriptResult.error}`);
+      }
+
+      const script: string = scriptResult.script!;
+      console.log("[generate-script] script generated successfully");
+
+      // Save script to project with status "completed" (script ready for review)
+      await ctx.runMutation(api.tasks.updateProjectWithReelfulData, {
+        id: projectId,
+        script,
+        status: "completed",
+      });
+
+      console.log("[generate-script] script saved to project");
+      return { success: true, script };
+    } catch (error) {
+      console.error("[generate-script] error:", error instanceof Error ? error.message : "unknown error");
+      await ctx.runMutation(api.tasks.updateProjectWithReelfulData, {
+        id: projectId,
+        error: error instanceof Error ? error.message : "script generation failed",
+        status: "failed",
+      });
+
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "script generation failed",
+      };
+    }
+  },
+});
+
+export const generateMediaAssets = action({
+  args: {
+    projectId: v.id("projects"),
+  },
+  handler: async (ctx, { projectId }): Promise<{ success: boolean; error?: string }> => {
+    console.log("[generate-media] starting media generation for project:", projectId);
+
+    let audioUrl: string | null | undefined;
+    let srtContent: string | undefined;
+    let musicUrl: string | null | undefined;
+    const videoUrls: string[] = [];
+
+    try {
+      const project = await ctx.runQuery(api.tasks.getProject, { id: projectId });
+      if (!project) {
+        throw new Error("project not found");
+      }
+
+      if (!project.script) {
+        throw new Error("no script found - generate or provide script first");
+      }
+
+      // Set status to processing
+      await ctx.runMutation(api.tasks.updateProjectStatus, {
+        id: projectId,
+        status: "processing",
+      });
+
+      console.log("[generate-media] step 1: generating voiceover");
+      // Get user's custom voice ID and preferred style if available
+      let voiceId: string | undefined;
+      let style = "professional"; // default
+      if (project.userId) {
+        const user = await ctx.runQuery(api.users.getCurrentUser, { userId: project.userId });
+        // Use selected voice if available, otherwise fall back to custom voice
+        if (user?.selectedVoiceId) {
+          voiceId = user.selectedVoiceId;
+          console.log("[generate-media] using user's selected voice ID:", voiceId);
+        } else if (user?.elevenlabsVoiceId) {
+          voiceId = user.elevenlabsVoiceId;
+          console.log("[generate-media] using user's custom voice ID:", voiceId);
+        }
+        // Get user's preferred style
+        if (user?.preferredStyle) {
+          style = user.preferredStyle;
+          console.log("[generate-media] using user's preferred style:", style);
+        }
+      }
+      
+      const voiceoverResult = await ctx.runAction(api.aiServices.generateVoiceover, {
+        text: project.script,
+        voiceId,
+      });
+
+      if (!voiceoverResult.success || !voiceoverResult.audioUrl) {
+        throw new Error(`voiceover generation failed: ${voiceoverResult.error}`);
+      }
+
+      audioUrl = voiceoverResult.audioUrl;
+      srtContent = voiceoverResult.srtContent;
+      const voiceoverDuration = voiceoverResult.durationMs || 15000;
+      console.log("[generate-media] voiceover uploaded:", audioUrl, "duration:", voiceoverDuration, "ms");
+      if (srtContent) {
+        console.log("[generate-media] SRT generated, length:", srtContent.length, "chars");
+      }
+
+      console.log("[generate-media] step 2: generating background music");
+      const adjustedMusicDuration = Math.floor(voiceoverDuration / 1.25);
+      console.log("[generate-media] music duration (voiceover / 1.25):", adjustedMusicDuration, "ms");
+      
+      const musicResult = await ctx.runAction(api.aiServices.generateMusic, {
+        prompt: prompts.musicGeneration.prompt(style),
+        durationMs: adjustedMusicDuration,
+      });
+
+      musicUrl = musicResult.success ? musicResult.musicUrl : undefined;
+      if (musicUrl) {
+        console.log("[generate-media] music uploaded:", musicUrl);
+      }
+
+      console.log("[generate-media] step 3: animating images");
+      const fileUrls = project.fileUrls?.filter((url: string | null): url is string => url !== null) || [];
+      console.log("[generate-media] Total file URLs:", fileUrls.length);
+      
+      // Filter images using fileMetadata contentType instead of URL extensions
+      const imageOnlyUrls: string[] = [];
+      if (project.fileMetadata && project.fileMetadata.length > 0) {
+        console.log("[generate-media] Using fileMetadata to identify images");
+        for (let i = 0; i < project.fileMetadata.length; i++) {
+          const meta = project.fileMetadata[i];
+          console.log(`[generate-media] File ${i + 1}: ${meta.filename}, type: ${meta.contentType}`);
+          
+          if (meta.contentType.startsWith('image/')) {
+            const url = fileUrls[i];
+            if (url) {
+              imageOnlyUrls.push(url);
+              console.log(`[generate-media] ✓ Found image: ${meta.filename} (${meta.contentType})`);
+            }
+          }
+        }
+      } else {
+        // Fallback to old method if no metadata
+        console.log("[generate-media] No fileMetadata, falling back to URL extension check");
+        imageOnlyUrls.push(...fileUrls.filter((url: string) => isImageUrl(url)));
+      }
+      
+      console.log("[generate-media] Image URLs found:", imageOnlyUrls.length);
+      console.log("[generate-media] Will animate ALL images:", imageOnlyUrls.length);
+      
+      if (imageOnlyUrls.length === 0) {
+        console.log("[generate-media] ⚠️ No images to animate! Skipping animation step.");
+      }
+      
+      for (let i = 0; i < imageOnlyUrls.length; i++) {
+        console.log(`[generate-media] ========================================`);
+        console.log(`[generate-media] Processing image ${i + 1}/${imageOnlyUrls.length}`);
+        console.log(`[generate-media] Image URL:`, imageOnlyUrls[i].substring(0, 80));
+        console.log(`[generate-media] ========================================`);
+        
+        try {
+          console.log(`[generate-media] Calling animateImage action...`);
+          const animateResult = await ctx.runAction(api.aiServices.animateImage, {
+            imageUrl: imageOnlyUrls[i],
+          });
+
+          console.log(`[generate-media] Animation result for image ${i + 1}:`, {
+            success: animateResult.success,
+            hasData: !!animateResult.data,
+            dataType: animateResult.data ? typeof animateResult.data : 'null',
+            error: animateResult.error,
+            requestId: (animateResult as any).requestId,
+          });
+
+          if (animateResult.data) {
+            console.log(`[generate-media] Result data structure:`, JSON.stringify(animateResult.data, null, 2));
+          }
+
+          if (animateResult.success && animateResult.data) {
+            const data = animateResult.data as any;
+            console.log(`[generate-media] Checking for video URL in result...`);
+            console.log(`[generate-media] data.video exists:`, !!data.video);
+            console.log(`[generate-media] data.video?.url exists:`, !!data.video?.url);
+            
+            const videoUrl = data.video?.url;
+            if (videoUrl) {
+              videoUrls.push(videoUrl);
+              console.log(`[generate-media] ✅ Animated image ${i + 1} SUCCESS`);
+              console.log(`[generate-media] Video URL:`, videoUrl);
+              console.log(`[generate-media] Total videos so far:`, videoUrls.length);
+              
+              console.log(`[generate-media] Updating project with new video...`);
+              await ctx.runMutation(api.tasks.updateProjectWithReelfulData, {
+                id: projectId,
+                script: project.script,
+                audioUrl: audioUrl || undefined,
+                srtContent: srtContent || undefined,
+                musicUrl: musicUrl || undefined,
+                videoUrls: videoUrls.length > 0 ? videoUrls : undefined,
+                status: "processing",
+              });
+              console.log(`[generate-media] ✓ Project updated with ${videoUrls.length} videos`);
+            } else {
+              console.error(`[generate-media] ❌ Image ${i + 1} animation succeeded but no video URL in result!`);
+              console.error(`[generate-media] Full result data:`, JSON.stringify(animateResult.data, null, 2));
+            }
+          } else {
+            console.error(`[generate-media] ❌ Image ${i + 1} animation failed`);
+            console.error(`[generate-media] Error:`, animateResult.error);
+            console.error(`[generate-media] Full result:`, JSON.stringify(animateResult, null, 2));
+          }
+        } catch (error) {
+          console.error(`[generate-media] ❌ Exception animating image ${i + 1}`);
+          console.error(`[generate-media] Exception type:`, error?.constructor?.name);
+          console.error(`[generate-media] Exception message:`, error instanceof Error ? error.message : String(error));
+          console.error(`[generate-media] Full exception:`, error);
+        }
+      }
+
+      await ctx.runMutation(api.tasks.updateProjectWithReelfulData, {
+        id: projectId,
+        script: project.script,
+        audioUrl: audioUrl || undefined,
+        srtContent: srtContent || undefined,
+        musicUrl: musicUrl || undefined,
+        videoUrls: videoUrls.length > 0 ? videoUrls : undefined,
+        status: "completed",
+      });
+
+      console.log("[generate-media] media generation complete");
+      console.log("[generate-media] Final state:");
+      console.log("[generate-media]   - audioUrl:", audioUrl ? "✓ " + audioUrl.substring(0, 50) : "✗");
+      console.log("[generate-media]   - musicUrl:", musicUrl ? "✓ " + musicUrl.substring(0, 50) : "✗");
+      console.log("[generate-media]   - videoUrls:", videoUrls.length, "videos");
+      console.log("[generate-media]   - status: completed");
+      return { success: true };
+    } catch (error) {
+      console.error("[generate-media] error:", error instanceof Error ? error.message : "unknown error");
+      await ctx.runMutation(api.tasks.updateProjectWithReelfulData, {
+        id: projectId,
+        error: error instanceof Error ? error.message : "media generation failed",
+        status: "failed",
+      });
+
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "media generation failed",
+      };
+    }
+  },
+});
+
 export const processProjectWithAI = action({
   args: {
     projectId: v.id("projects"),
@@ -379,11 +664,22 @@ export const processProjectWithAI = action({
         throw new Error("project not found");
       }
 
+      // Get user's preferred style
+      let style = "professional"; // default
+      if (project.userId) {
+        const user = await ctx.runQuery(api.users.getCurrentUser, { userId: project.userId });
+        if (user?.preferredStyle) {
+          style = user.preferredStyle;
+          console.log("[ai-process] using user's preferred style:", style);
+        }
+      }
+
       console.log("[ai-process] step 1: generating script");
       const fileUrls = project.fileUrls?.filter((url: string | null): url is string => url !== null) || [];
       const scriptResult = await ctx.runAction(api.aiServices.generateScript, {
         prompt: project.prompt,
         imageUrls: fileUrls,
+        style,
       });
 
       if (!scriptResult.success) {
@@ -430,7 +726,7 @@ export const processProjectWithAI = action({
       console.log("[ai-process] music duration (voiceover / 1.25):", adjustedMusicDuration, "ms");
       
       const musicResult = await ctx.runAction(api.aiServices.generateMusic, {
-        prompt: "upbeat background music for social media video",
+        prompt: prompts.musicGeneration.prompt(style),
         durationMs: adjustedMusicDuration,
       });
 
@@ -440,29 +736,72 @@ export const processProjectWithAI = action({
       }
 
       console.log("[ai-process] step 4: animating images");
-      const imageOnlyUrls = fileUrls.filter((url: string) => isImageUrl(url));
-      for (let i = 0; i < Math.min(imageOnlyUrls.length, 3); i++) {
-        console.log(`[ai-process] animating image ${i + 1}/${imageOnlyUrls.length}`);
-        const animateResult = await ctx.runAction(api.aiServices.animateImage, {
-          imageUrl: imageOnlyUrls[i],
-        });
-
-        if (animateResult.success && animateResult.data) {
-          const videoUrl = (animateResult.data).video?.url;
-          if (videoUrl) {
-            videoUrls.push(videoUrl);
-            console.log(`[ai-process] animated image ${i + 1}, saving progress...`);
-            
-            await ctx.runMutation(api.tasks.updateProjectWithReelfulData, {
-              id: projectId,
-              script,
-              audioUrl: audioUrl || undefined,
-              srtContent: srtContent || undefined,
-              musicUrl: musicUrl || undefined,
-              videoUrls: videoUrls.length > 0 ? videoUrls : undefined,
-              status: "processing",
-            });
+      
+      // Filter images using fileMetadata contentType instead of URL extensions
+      const imageOnlyUrls: string[] = [];
+      if (project.fileMetadata && project.fileMetadata.length > 0) {
+        console.log("[ai-process] Using fileMetadata to identify images");
+        for (let i = 0; i < project.fileMetadata.length; i++) {
+          const meta = project.fileMetadata[i];
+          console.log(`[ai-process] File ${i + 1}: ${meta.filename}, type: ${meta.contentType}`);
+          
+          if (meta.contentType.startsWith('image/')) {
+            const url = fileUrls[i];
+            if (url) {
+              imageOnlyUrls.push(url);
+              console.log(`[ai-process] ✓ Found image: ${meta.filename} (${meta.contentType})`);
+            }
           }
+        }
+      } else {
+        // Fallback to old method if no metadata
+        console.log("[ai-process] No fileMetadata, falling back to URL extension check");
+        imageOnlyUrls.push(...fileUrls.filter((url: string) => isImageUrl(url)));
+      }
+      
+      console.log("[ai-process] Will animate ALL images:", imageOnlyUrls.length);
+      
+      for (let i = 0; i < imageOnlyUrls.length; i++) {
+        console.log(`[ai-process] ========================================`);
+        console.log(`[ai-process] Animating image ${i + 1}/${imageOnlyUrls.length}`);
+        console.log(`[ai-process] Image URL:`, imageOnlyUrls[i].substring(0, 80));
+        
+        try {
+          const animateResult = await ctx.runAction(api.aiServices.animateImage, {
+            imageUrl: imageOnlyUrls[i],
+          });
+
+          console.log(`[ai-process] Animation result:`, {
+            success: animateResult.success,
+            hasData: !!animateResult.data,
+            error: animateResult.error,
+          });
+
+          if (animateResult.success && animateResult.data) {
+            const videoUrl = (animateResult.data as any).video?.url;
+            if (videoUrl) {
+              videoUrls.push(videoUrl);
+              console.log(`[ai-process] ✅ Animated image ${i + 1}, video URL:`, videoUrl);
+              console.log(`[ai-process] Total videos: ${videoUrls.length}`);
+              
+              await ctx.runMutation(api.tasks.updateProjectWithReelfulData, {
+                id: projectId,
+                script,
+                audioUrl: audioUrl || undefined,
+                srtContent: srtContent || undefined,
+                musicUrl: musicUrl || undefined,
+                videoUrls: videoUrls.length > 0 ? videoUrls : undefined,
+                status: "processing",
+              });
+              console.log(`[ai-process] ✓ Project updated`);
+            } else {
+              console.error(`[ai-process] ❌ No video URL in animation result`);
+            }
+          } else {
+            console.error(`[ai-process] ❌ Animation failed:`, animateResult.error);
+          }
+        } catch (error) {
+          console.error(`[ai-process] ❌ Exception:`, error instanceof Error ? error.message : String(error));
         }
       }
 
@@ -512,10 +851,21 @@ export const regenerateScript = action({
         throw new Error("project not found");
       }
 
+      // Get user's preferred style
+      let style = "professional"; // default
+      if (project.userId) {
+        const user = await ctx.runQuery(api.users.getCurrentUser, { userId: project.userId });
+        if (user?.preferredStyle) {
+          style = user.preferredStyle;
+          console.log("[regenerate-script] using user's preferred style:", style);
+        }
+      }
+
       const imageUrls = project.fileUrls?.filter((url: string | null): url is string => url !== null) || [];
       const scriptResult = await ctx.runAction(api.aiServices.generateScript, {
         prompt: project.prompt,
         imageUrls,
+        style,
       });
 
       if (!scriptResult.success) {
@@ -652,24 +1002,67 @@ export const regenerateAnimations = action({
         throw new Error("project not found");
       }
 
-      const imageUrls = project.fileUrls?.filter((url: string | null): url is string => url !== null && isImageUrl(url)) || [];
+      const fileUrls = project.fileUrls?.filter((url: string | null): url is string => url !== null) || [];
+      
+      // Filter images using fileMetadata contentType instead of URL extensions
+      const imageUrls: string[] = [];
+      if (project.fileMetadata && project.fileMetadata.length > 0) {
+        console.log("[regenerate-animations] Using fileMetadata to identify images");
+        for (let i = 0; i < project.fileMetadata.length; i++) {
+          const meta = project.fileMetadata[i];
+          console.log(`[regenerate-animations] File ${i + 1}: ${meta.filename}, type: ${meta.contentType}`);
+          
+          if (meta.contentType.startsWith('image/')) {
+            const url = fileUrls[i];
+            if (url) {
+              imageUrls.push(url);
+              console.log(`[regenerate-animations] ✓ Found image: ${meta.filename} (${meta.contentType})`);
+            }
+          }
+        }
+      } else {
+        // Fallback to old method if no metadata
+        console.log("[regenerate-animations] No fileMetadata, falling back to URL extension check");
+        imageUrls.push(...fileUrls.filter((url: string) => isImageUrl(url)));
+      }
+      
       if (imageUrls.length === 0) {
         throw new Error("no images found");
       }
 
+      console.log("[regenerate-animations] Will animate ALL images:", imageUrls.length);
       const videoUrls: string[] = [];
-      for (let i = 0; i < Math.min(imageUrls.length, 3); i++) {
-        console.log(`[regenerate-animations] animating image ${i + 1}/${imageUrls.length}`);
-        const animateResult = await ctx.runAction(api.aiServices.animateImage, {
-          imageUrl: imageUrls[i],
-        });
+      
+      for (let i = 0; i < imageUrls.length; i++) {
+        console.log(`[regenerate-animations] ========================================`);
+        console.log(`[regenerate-animations] Animating image ${i + 1}/${imageUrls.length}`);
+        console.log(`[regenerate-animations] Image URL:`, imageUrls[i].substring(0, 80));
+        
+        try {
+          const animateResult = await ctx.runAction(api.aiServices.animateImage, {
+            imageUrl: imageUrls[i],
+          });
 
-        if (animateResult.success && animateResult.data) {
-          const videoUrl = (animateResult.data).video?.url;
-          if (videoUrl) {
-            videoUrls.push(videoUrl);
-            console.log(`[regenerate-animations] animated image ${i + 1}`);
+          console.log(`[regenerate-animations] Result:`, {
+            success: animateResult.success,
+            hasData: !!animateResult.data,
+            error: animateResult.error,
+          });
+
+          if (animateResult.success && animateResult.data) {
+            const videoUrl = (animateResult.data as any).video?.url;
+            if (videoUrl) {
+              videoUrls.push(videoUrl);
+              console.log(`[regenerate-animations] ✅ Animated image ${i + 1}, URL:`, videoUrl);
+              console.log(`[regenerate-animations] Total videos: ${videoUrls.length}`);
+            } else {
+              console.error(`[regenerate-animations] ❌ No video URL in result`);
+            }
+          } else {
+            console.error(`[regenerate-animations] ❌ Animation failed:`, animateResult.error);
           }
+        } catch (error) {
+          console.error(`[regenerate-animations] ❌ Exception:`, error instanceof Error ? error.message : String(error));
         }
       }
 
@@ -722,8 +1115,18 @@ export const regenerateMusic = action({
         throw new Error("project not found");
       }
 
+      // Get user's preferred style
+      let style = "professional"; // default
+      if (project.userId) {
+        const user = await ctx.runQuery(api.users.getCurrentUser, { userId: project.userId });
+        if (user?.preferredStyle) {
+          style = user.preferredStyle;
+          console.log("[regenerate-music] using user's preferred style:", style);
+        }
+      }
+
       const musicResult = await ctx.runAction(api.aiServices.generateMusic, {
-        prompt: "upbeat background music for social media video",
+        prompt: prompts.musicGeneration.prompt(style),
         durationMs: 15000,
       });
 

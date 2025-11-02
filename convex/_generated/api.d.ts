@@ -17,6 +17,7 @@ import type * as aiServices from "../aiServices.js";
 import type * as auth from "../auth.js";
 import type * as http from "../http.js";
 import type * as phoneAuth from "../phoneAuth.js";
+import type * as prompts from "../prompts.js";
 import type * as render from "../render.js";
 import type * as tasks from "../tasks.js";
 import type * as twilioVerify from "../twilioVerify.js";
@@ -35,6 +36,7 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   http: typeof http;
   phoneAuth: typeof phoneAuth;
+  prompts: typeof prompts;
   render: typeof render;
   tasks: typeof tasks;
   twilioVerify: typeof twilioVerify;
