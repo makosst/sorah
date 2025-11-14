@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "^2.0.48",
+    "@convex-dev/auth": "^0.0.90",
     "@elevenlabs/elevenlabs-js": "^2.18.0",
     "@fal-ai/client": "^1.6.2",
     "@vercel/sandbox": "^0.0.23",
@@ -27,6 +28,7 @@
     "react-dom": "19.1.0",
     "remotion": "^4.0.357",
     "tailwind-merge": "^3.3.1",
+    "twilio": "^5.10.3",
     "zod": "^4.1.12"
   },
   "devDependencies": {

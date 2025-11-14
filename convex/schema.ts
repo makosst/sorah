@@ -1,12 +1,34 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
+import { authTables } from "@convex-dev/auth/server";
 
 export default defineSchema({
+  ...authTables,
+  otpCodes: defineTable({
+    phone: v.string(),
+    code: v.string(),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+  }).index("by_phone", ["phone"]),
+  users: defineTable({
+    name: v.optional(v.string()),
+    phone: v.optional(v.string()),
+    preferredStyle: v.optional(v.union(
+      v.literal("playful"),
+      v.literal("professional"),
+      v.literal("travel")
+    )),
+    voiceRecordingUrl: v.optional(v.string()),
+    voiceRecordingStorageId: v.optional(v.id("_storage")),
+    onboardingCompleted: v.boolean(),
+    createdAt: v.number(),
+  }).index("by_phone", ["phone"]),
   tasks: defineTable({
     text: v.string(),
     isCompleted: v.boolean(),
   }),
   projects: defineTable({
+    userId: v.optional(v.id("users")),
     prompt: v.string(),
     files: v.array(v.id("_storage")),
     fileMetadata: v.optional(v.array(v.object({
@@ -56,6 +78,6 @@ export default defineSchema({
       v.literal("failed")
     )),
     renderError: v.optional(v.string()),
-  }),
+  }).index("by_user", ["userId"]),
 });
 

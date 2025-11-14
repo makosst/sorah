@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
-import { useMutation, useAction } from "convex/react";
+import { useMutation, useAction, useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
+import { useAuth } from "@/lib/auth";
 
 export default function Upload() {
   const [prompt, setPrompt] = useState("");
@@ -13,10 +14,38 @@ export default function Upload() {
   const [thumbnailIndex, setThumbnailIndex] = useState<number | null>(null);
   const [uploading, setUploading] = useState(false);
   const router = useRouter();
+  const { userId, isInitialized } = useAuth();
+  const currentUser = useQuery(api.users.getCurrentUser, userId ? { userId } : "skip");
   
+  // ALL HOOKS MUST BE CALLED BEFORE ANY CONDITIONAL RETURNS
   const generateUploadUrl = useMutation(api.tasks.generateUploadUrl);
   const createProject = useMutation(api.tasks.createProject);
   const processProjectWithAI = useAction(api.tasks.processProjectWithAI);
+
+  // Redirect if not authenticated
+  useEffect(() => {
+    if (isInitialized && !userId) {
+      router.push("/auth");
+    } else if (currentUser && !currentUser.onboardingCompleted) {
+      router.push("/onboarding");
+    }
+  }, [isInitialized, userId, currentUser, router]);
+
+  // Show loading while checking auth
+  if (!isInitialized || !userId || currentUser === undefined) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-purple-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-gray-600">loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser?.onboardingCompleted) {
+    return null;
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,6 +85,7 @@ export default function Upload() {
           : 0;
       
       const newProjectId = await createProject({ 
+        userId,
         prompt, 
         files: fileIds,
         fileMetadata,

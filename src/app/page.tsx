@@ -4,18 +4,69 @@ import { useQuery, useMutation, useAction } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { HeroSection } from "@/components/ui/hero-section-dark";
+import { useAuth } from "@/lib/auth";
 
 export default function Home() {
-  const projects = useQuery(api.tasks.getProjects);
+  const { userId, signOut, isInitialized } = useAuth();
+  const projects = useQuery(api.tasks.getProjects, userId ? { userId } : "skip");
+  const currentUser = useQuery(api.users.getCurrentUser, userId ? { userId } : "skip");
   const simulateCompleted = useMutation(api.tasks.simulateCompleted);
   const deleteProject = useMutation(api.tasks.deleteProject);
   const renderVideo = useAction(api.render.renderVideo);
   const router = useRouter();
   const [renderingIds, setRenderingIds] = useState<Set<string>>(new Set());
+
+  // Redirect to auth if not logged in
+  useEffect(() => {
+    if (isInitialized && !userId) {
+      router.push("/auth");
+    } else if (currentUser && !currentUser.onboardingCompleted) {
+      router.push("/onboarding");
+    }
+  }, [isInitialized, userId, currentUser, router]);
+
+  // Show loading state while checking auth
+  if (!isInitialized || !userId || currentUser === undefined) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-purple-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-gray-600">loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Don't show content if redirecting
+  if (!currentUser || !currentUser.onboardingCompleted) {
+    return null;
+  }
+
   return (
     <main className="min-h-screen">
+      {/* User Profile Bar */}
+      <div className="bg-white border-b border-gray-200">
+        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-gradient-to-r from-purple-600 to-blue-600 rounded-full flex items-center justify-center text-white font-bold">
+              {currentUser.name?.[0]?.toUpperCase() || "U"}
+            </div>
+            <div>
+              <p className="font-medium text-gray-900">{currentUser.name || "User"}</p>
+              <p className="text-sm text-gray-500 capitalize">{currentUser.preferredStyle || "no style"} style</p>
+            </div>
+          </div>
+          <button
+            onClick={() => signOut()}
+            className="px-4 py-2 text-gray-600 hover:text-gray-900 transition-colors"
+          >
+            sign out
+          </button>
+        </div>
+      </div>
+
       <HeroSection
         title="turn your videos into magic"
         subtitle={{
@@ -92,7 +143,7 @@ export default function Home() {
                           onClick={(e) => e.stopPropagation()}
                           className="px-3 py-1 bg-purple-100 text-purple-700 rounded-lg text-sm hover:bg-purple-200 transition-colors"
                         >
-                          🎤 audio
+                          audio
                         </a>
                       )}
                       {project.musicUrl && (
@@ -103,7 +154,7 @@ export default function Home() {
                           onClick={(e) => e.stopPropagation()}
                           className="px-3 py-1 bg-blue-100 text-blue-700 rounded-lg text-sm hover:bg-blue-200 transition-colors"
                         >
-                          🎵 music
+                          music
                         </a>
                       )}
                       {project.videoUrls?.map((url, i) => (
@@ -115,7 +166,7 @@ export default function Home() {
                           onClick={(e) => e.stopPropagation()}
                           className="px-3 py-1 bg-pink-100 text-pink-700 rounded-lg text-sm hover:bg-pink-200 transition-colors"
                         >
-                          🎬 video {i + 1}
+                          video {i + 1}
                         </a>
                       ))}
                     </div>

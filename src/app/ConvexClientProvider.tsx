@@ -1,6 +1,7 @@
 "use client";
 
 import { ConvexProvider, ConvexReactClient } from "convex/react";
+import { AuthProvider } from "@/lib/auth";
 import type { ReactNode } from "react";
 
 const convex = new ConvexReactClient(
@@ -8,5 +9,9 @@ const convex = new ConvexReactClient(
 );
 
 export function ConvexClientProvider({ children }: { children: ReactNode }) {
-  return <ConvexProvider client={convex}>{children}</ConvexProvider>;
+  return (
+    <ConvexProvider client={convex}>
+      <AuthProvider>{children}</AuthProvider>
+    </ConvexProvider>
+  );
 }

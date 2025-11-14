@@ -24,6 +24,7 @@ export const generateUploadUrl = mutation({
 
 export const createProject = mutation({
   args: {
+    userId: v.optional(v.id("users")),
     prompt: v.string(),
     files: v.array(v.id("_storage")),
     fileMetadata: v.optional(v.array(v.object({
@@ -34,8 +35,9 @@ export const createProject = mutation({
     }))),
     thumbnail: v.optional(v.id("_storage")),
   },
-  handler: async (ctx, { prompt, files, fileMetadata, thumbnail }) => {
+  handler: async (ctx, { userId, prompt, files, fileMetadata, thumbnail }) => {
     return await ctx.db.insert("projects", {
+      userId,
       prompt,
       files,
       fileMetadata,
@@ -74,9 +76,19 @@ export const addFilesToProject = mutation({
 });
 
 export const getProjects = query({
-  args: {},
-  handler: async (ctx) => {
-    const projects = await ctx.db.query("projects").order("desc").collect();
+  args: {
+    userId: v.optional(v.id("users")),
+  },
+  handler: async (ctx, args) => {
+    // Filter by userId if provided, otherwise get all projects
+    const projects = args.userId
+      ? await ctx.db
+          .query("projects")
+          .withIndex("by_user", (q) => q.eq("userId", args.userId))
+          .order("desc")
+          .collect()
+      : await ctx.db.query("projects").order("desc").collect();
+    
     return await Promise.all(
       projects.map(async (project) => ({
         ...project,
